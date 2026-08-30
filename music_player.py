@@ -31,6 +31,8 @@ class MusicPlayer(tk.Tk):
         self.is_playing = False
         self.is_paused = False
         self.track_length = 0
+        self.seek_offset = 0.0  # Tracks absolute position offset in seconds
+        self.is_seeking = False  # Prevents progress loop from jumping while dragging slider
 
         self._setup_ui()
         self._bind_shortcuts()
@@ -168,6 +170,11 @@ class MusicPlayer(tk.Tk):
         self.progress_bar = ttk.Scale(controls_frame, from_=0, to=100, variable=self.progress_var, orient="horizontal")
         self.progress_bar.pack(fill="x", padx=15, pady=(0, 5))
 
+        # Seek Bindings for Interactive Scrubber
+        self.progress_bar.bind("<Button-1>", self._on_seek_start)
+        self.progress_bar.bind("<B1-Motion>", self._on_seeking)
+        self.progress_bar.bind("<ButtonRelease-1>", self._on_seek_end)
+
         # Media Controls & Volume Frame
         bottom_ctrl = tk.Frame(controls_frame, bg="#2b2b2b")
         bottom_ctrl.pack(fill="x", padx=15, pady=5)
@@ -178,6 +185,9 @@ class MusicPlayer(tk.Tk):
 
         btn_style = {"bg": "#3a3a3a", "fg": "#ffffff", "activebackground": "#505050", "activeforeground": "#ffffff",
                      "bd": 0, "width": 4, "font": ("Segoe UI", 11)}
+
+        self.btn_rewind = tk.Button(btn_frame, text="↺", command=self.rewind_track, **btn_style)
+        self.btn_rewind.pack(side="left", padx=3)
 
         self.btn_prev = tk.Button(btn_frame, text="⏮", command=self.prev_track, **btn_style)
         self.btn_prev.pack(side="left", padx=3)
@@ -328,11 +338,12 @@ class MusicPlayer(tk.Tk):
                     self.play_track(track)
                     break
 
-    def play_track(self, track):
+    def play_track(self, track, start_pos=0.0):
         self.current_track = track
+        self.seek_offset = start_pos  # Store original start offset
 
         pygame.mixer.music.load(track["path"])
-        pygame.mixer.music.play()
+        pygame.mixer.music.play(start=start_pos)
         self.is_playing = True
         self.is_paused = False
         self.btn_play.config(text="⏸")
@@ -371,6 +382,16 @@ class MusicPlayer(tk.Tk):
             self.is_playing = False
             self.btn_play.config(text="▶")
 
+    def rewind_track(self):
+        """ Restarts current song from the beginning """
+        if self.current_track:
+            self.seek_offset = 0.0
+            pygame.mixer.music.play(start=0.0)
+            if self.is_paused:
+                pygame.mixer.music.pause()
+            self.progress_var.set(0)
+            self.lbl_time_cur.config(text="0:00")
+
     def prev_track(self):
         if self.current_track and self.raw_playlist:
             idx = self.raw_playlist.index(self.current_track)
@@ -398,6 +419,44 @@ class MusicPlayer(tk.Tk):
         self.vol_var.set(new_val)
         self._set_volume(new_val)
 
+    # ------------------- Seeking Logic -------------------
+    def _calculate_seek_time(self, event):
+        """ Map click/drag position on the scale bar to track seconds """
+        width = self.progress_bar.winfo_width()
+        if width > 0 and self.track_length > 0:
+            click_x = max(0, min(event.x, width))
+            target_pct = click_x / width
+            return target_pct * self.track_length
+        return 0.0
+
+    def _on_seek_start(self, event):
+        if self.current_track and self.track_length > 0:
+            self.is_seeking = True
+            self._on_seeking(event)
+
+    def _on_seeking(self, event):
+        if self.is_seeking and self.track_length > 0:
+            target_time = self._calculate_seek_time(event)
+            pct = (target_time / self.track_length) * 100
+            self.progress_var.set(pct)
+            self.lbl_time_cur.config(text=self._format_time(target_time))
+
+    def _on_seek_end(self, event):
+        if self.is_seeking and self.current_track and self.track_length > 0:
+            target_time = self._calculate_seek_time(event)
+            self.seek_offset = target_time  # Update target offset
+
+            # Restart playback at target location
+            pygame.mixer.music.play(start=target_time)
+
+            if self.is_paused:
+                pygame.mixer.music.pause()
+            else:
+                self.is_playing = True
+                self.btn_play.config(text="⏸")
+
+            self.is_seeking = False
+
     def _load_cover_art(self, file_path):
         try:
             audio = FLAC(file_path)
@@ -415,10 +474,12 @@ class MusicPlayer(tk.Tk):
         self.art_label.config(image="", text="No Cover Art Available")
 
     def _update_progress(self):
-        if self.is_playing and not self.is_paused:
+        if self.is_playing and not self.is_paused and not self.is_seeking:
             pos_ms = pygame.mixer.music.get_pos()
             if pos_ms != -1:
-                pos_sec = pos_ms / 1000.0
+                # Add the seek offset to Pygame's elapsed timer
+                pos_sec = self.seek_offset + (pos_ms / 1000.0)
+
                 if self.track_length > 0:
                     pct = (pos_sec / self.track_length) * 100
                     self.progress_var.set(pct)
